@@ -435,6 +435,7 @@ async fn recv_engine_message(dealer: &mut DealerSocket) -> Vec<Bytes> {
 struct FakeChatBackend {
     model_id: String,
     multimodal_model_info: Option<vllm_chat::multimodal::MultimodalModelInfo>,
+    renderer: Option<DynChatRenderer>,
 }
 
 /// Synthetic BOS id used when `add_special_tokens` is true in tests.
@@ -459,6 +460,7 @@ impl FakeChatBackend {
         Self {
             model_id: "test-model".to_string(),
             multimodal_model_info: None,
+            renderer: None,
         }
     }
 
@@ -466,6 +468,7 @@ impl FakeChatBackend {
         Self {
             model_id: model_id.into(),
             multimodal_model_info: None,
+            renderer: None,
         }
     }
 
@@ -475,6 +478,7 @@ impl FakeChatBackend {
         Self {
             model_id: "test-model".to_string(),
             multimodal_model_info: Some(multimodal_model_info),
+            renderer: None,
         }
     }
 }
@@ -499,7 +503,7 @@ impl TextBackend for FakeChatBackend {
 
 impl ChatBackend for FakeChatBackend {
     fn chat_renderer(&self) -> DynChatRenderer {
-        Arc::new(self.clone())
+        self.renderer.clone().unwrap_or_else(|| Arc::new(self.clone()))
     }
 
     fn multimodal_model_info(&self) -> Option<&vllm_chat::multimodal::MultimodalModelInfo> {
@@ -7804,6 +7808,63 @@ async fn tokenize_allows_prompts_at_or_above_max_model_len() {
     assert_eq!(chat_status, StatusCode::OK);
     assert!(chat_json["count"].as_u64().expect("count") > 4);
     assert_eq!(chat_json["max_model_len"], 4);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenize_chat_renderer_validation_matches_generation_status() {
+    let backend = FakeChatBackend {
+        renderer: Some(Arc::new(vllm_chat::DeepSeekV41ChatRenderer::default())),
+        ..FakeChatBackend::new()
+    };
+    let (mut app, _engine_task) =
+        test_app_with_backend_and_stream_output_specs(Arc::new(backend), vec![]).await;
+    let request = json!({
+        "model": "Qwen/Qwen1.5-0.5B-Chat",
+        "messages": [{"role": "root", "content": "hi"}],
+    });
+
+    for uri in ["/tokenize", "/v1/chat/completions"] {
+        let (status, body) = post_json(&mut app, uri, request.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body}");
+        expect_test::expect![[r#"
+            {
+              "error": {
+                "message": "chat role `root` is not supported by this chat renderer",
+                "type": "invalid_request_error",
+                "param": null,
+                "code": "invalid_request_error"
+              }
+            }"#]]
+        .assert_eq(&serde_json::to_string_pretty(&body).expect("error JSON"));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenize_chat_internal_render_failure_stays_500() {
+    struct MissingTemplateRenderer;
+    impl ChatRenderer for MissingTemplateRenderer {
+        fn render(&self, _request: &ChatRequest) -> vllm_chat::Result<vllm_chat::RenderedPrompt> {
+            Err(vllm_chat::Error::MissingChatTemplate)
+        }
+    }
+    let backend = FakeChatBackend {
+        renderer: Some(Arc::new(MissingTemplateRenderer)),
+        ..FakeChatBackend::new()
+    };
+    let (mut app, _engine_task) =
+        test_app_with_backend_and_stream_output_specs(Arc::new(backend), vec![]).await;
+    let (status, body) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({"messages": [{"role": "user", "content": "hi"}]}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body["error"]["type"], "server_error");
+    assert!(body["error"]["message"].as_str().unwrap().starts_with("tokenize failed:"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
