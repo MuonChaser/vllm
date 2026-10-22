@@ -214,12 +214,21 @@ COPY requirements/common.txt requirements/common.txt
 COPY requirements/cuda.txt requirements/cuda.txt
 COPY tools/use_existing_torch.py tools/use_existing_torch.py
 COPY pyproject.toml pyproject.toml
+ENV UV_OVERRIDE=/etc/uv-overrides.txt
 RUN --mount=type=cache,target=/opt/uv/cache \
     --mount=type=bind,source=requirements,target=/tmp/vllm-requirements,ro \
     if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ] && \
         [ ! -f /tmp/vllm-requirements/rubin-prerelease.txt ]; then \
         echo "INSTALL_RUBIN_PRERELEASE=true requires requirements/rubin-prerelease.txt" >&2; \
         exit 1; \
+    fi \
+    && touch /etc/uv-overrides.txt \
+    && if [ "${CUDA_VERSION%%.*}" = "12" ] && [ "${PYTORCH_NIGHTLY}" != "1" ] && \
+        [ "${INSTALL_RUBIN_PRERELEASE}" != "true" ]; then \
+        sed -n '/^torchcodec[[:space:]>]/p' requirements/cuda.txt \
+            | uv pip compile --python /opt/venv/bin/python3 --no-deps --no-index \
+                --find-links "${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')/torchcodec/" \
+                --no-header --no-annotate -o /etc/uv-overrides.txt -; \
     fi \
     && if [ "$(echo $CUDA_VERSION | cut -d. -f1)" = "12" ]; then \
         sed -i 's/^nvidia-cutlass-dsl\[cu13\]/nvidia-cutlass-dsl/' requirements/cuda.txt; \
@@ -916,12 +925,22 @@ ENV VLLM_ENABLE_CUDA_COMPATIBILITY=0
 ARG PYTORCH_CUDA_INDEX_BASE_URL
 COPY requirements/common.txt /tmp/common.txt
 COPY requirements/cuda.txt /tmp/requirements-cuda.txt
+ARG PYTORCH_NIGHTLY
 RUN --mount=type=cache,target=/opt/uv/cache \
     --mount=type=bind,source=requirements,target=/tmp/vllm-requirements,ro \
     if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ] && \
         [ ! -f /tmp/vllm-requirements/rubin-prerelease.txt ]; then \
         echo "INSTALL_RUBIN_PRERELEASE=true requires requirements/rubin-prerelease.txt" >&2; \
         exit 1; \
+    fi && \
+    if [ "${CUDA_VERSION%%.*}" = "12" ] && [ "${PYTORCH_NIGHTLY}" != "1" ] && \
+        [ "${INSTALL_RUBIN_PRERELEASE}" != "true" ]; then \
+        sed -n '/^torchcodec[[:space:]>]/p' /tmp/requirements-cuda.txt \
+            | uv pip compile --no-deps --no-index \
+                --find-links "${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')/torchcodec/" \
+                --no-header --no-annotate -o /tmp/torchcodec-override.txt - \
+            && cat /tmp/torchcodec-override.txt >> /etc/uv-overrides.txt \
+            && rm /tmp/torchcodec-override.txt; \
     fi && \
     if [ "$(echo $CUDA_VERSION | cut -d. -f1)" = "12" ]; then \
         sed -i 's/^nvidia-cutlass-dsl\[cu13\]/nvidia-cutlass-dsl/' /tmp/requirements-cuda.txt; \

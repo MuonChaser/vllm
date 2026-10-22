@@ -20,6 +20,13 @@ The edges of the build graph represent:
 The `test-deps` stage branches from `vllm-runtime-base` so Git and the test
 requirements remain cached independently of per-commit vLLM wheels and source.
 
+For stable CUDA 12 builds, TorchCodec is resolved from the matching CUDA index
+under `PYTORCH_CUDA_INDEX_BASE_URL`. The selected version is kept in the uv
+overrides for subsequent dependency installations, including dev and test
+requirements. This prevents a newer PyPI CUDA 13 wheel from replacing it.
+CUDA 13, PyTorch nightly and Rubin prerelease builds retain their existing
+package selection.
+
 The `vllm-runtime-base` stage explicitly installs the current Ubuntu
 `ca-certificates` package so clients using the system trust store receive
 certificate removals when the image is rebuilt. This complements the Python
